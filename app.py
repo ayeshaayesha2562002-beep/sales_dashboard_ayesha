@@ -1,171 +1,161 @@
-import streamlit as st
 import pandas as pd
 import plotly.express as px
-import plotly.graph_objects as go
+import streamlit as st
 
-# Set up page configuration
-st.set_page_config(page_title="Electronics Store Sales Dashboard (2019)", layout="wide")
+st.set_page_config(page_title="Sales Dashboard", layout="wide")
 
-cleaning_steps = {}
+BLUE = "#2a6fdb"
+
+
+if int(st.__version__.split(".")[1]) >= 50:
+    FULL_WIDTH = {"width": "stretch"}
+else:
+    FULL_WIDTH = {"use_container_width": True}
+
+
+def show(fig):
+    st.plotly_chart(fig, **FULL_WIDTH)
+MONTHS = ["January", "February", "March", "April", "May", "June", "July",
+          "August", "September", "October", "November", "December"]
+
 
 @st.cache_data
-def load_and_clean_data():
-    df = pd.read_csv("Sales Data.csv")
-    cleaning_steps['Original Dataset'] = len(df)
-    
-    if "Unnamed: 0" in df.columns:
-        df = df.drop(columns=["Unnamed: 0"])
-        
-    df = df.dropna()
-    cleaning_steps['After Dropping Missing Values'] = len(df)
-    
-    df = df[df['Quantity Ordered'] != 'Quantity Ordered']
-    cleaning_steps['After Removing Text Header Rows'] = len(df)
-    
-    df['Quantity Ordered'] = pd.to_numeric(df['Quantity Ordered'])
-    df['Price Each'] = pd.to_numeric(df['Price Each'])
-    
-    df = df.drop_duplicates()
-    cleaning_steps['After Removing Duplicates'] = len(df)
-    
-    df['Order Date'] = pd.to_datetime(df['Order Date'])
-    df['Sales'] = df['Quantity Ordered'] * df['Price Each']
-    df['Month'] = df['Order Date'].dt.strftime('%B')
-    df['Hour'] = df['Order Date'].dt.hour
-    df['Day of Week'] = df['Order Date'].dt.strftime('%A')
-    
-    def get_city_state(address):
-        try:
-            parts = address.split(',')
-            city = parts[1].strip()
-            state = parts[2].strip().split(' ')[0]
-            return f"{city} ({state})"
-        except:
-            return "Unknown"
-            
-    df['City'] = df['Purchase Address'].apply(get_city_state)
-    df['State'] = df['Purchase Address'].apply(lambda x: x.split(',')[2].strip().split(' ')[0] if len(str(x).split(',')) > 2 else "Unknown")
-    
-    df = df[df['Order Date'].dt.year == 2019]
-    cleaning_steps['Final Cleaned Data (Strictly 2019)'] = len(df)
-    
-    return df
+def read_default_file():
+    return pd.read_csv("Sales Data.csv")
 
+
+@st.cache_data
+def clean_data(raw):
+    report = {}
+    df = raw.drop(columns="Unnamed: 0", errors="ignore")
+    report["Rows in the file"] = len(df)
+
+    before = len(df)
+    df = df.dropna()
+    report["Empty rows removed"] = before - len(df)
+
+    df["Order Date"] = pd.to_datetime(df["Order Date"])
+
+    before = len(df)
+    df = df.drop_duplicates()
+    report["Duplicate rows removed"] = before - len(df)
+
+    before = len(df)
+    df = df[df["Order Date"].dt.year == 2019].copy()
+    report["Rows outside 2019 removed"] = before - len(df)
+    report["Rows used in the dashboard"] = len(df)
+
+    df["Sales"] = df["Quantity Ordered"] * df["Price Each"]
+    df["Month"] = df["Order Date"].dt.month_name()
+    df["Hour"] = df["Order Date"].dt.hour
+    parts = df["Purchase Address"].str.split(",")
+    df["City"] = parts.str[1].str.strip() + " (" + parts.str[2].str.strip().str[:2] + ")"
+    return df, report
+
+
+# ---------- load the data ----------
+st.title("Electronics Store Sales Dashboard, 2019")
+
+uploaded = st.sidebar.file_uploader("Upload Sales Data.csv (optional)", type="csv")
 try:
-    df_raw = load_and_clean_data()
-except Exception as e:
-    st.error(f"Error loading 'Sales Data.csv'. Details: {e}")
+    raw = pd.read_csv(uploaded) if uploaded is not None else read_default_file()
+except FileNotFoundError:
+    st.error("Put `Sales Data.csv` in the same folder as app.py, or upload it in the sidebar.")
     st.stop()
 
-st.title("🔌 Electronics Store Sales Performance Dashboard (2019)")
-st.sidebar.header("🎛️ Dashboard Filters")
+df, report = clean_data(raw)
 
-available_months = sorted(df_raw['Month'].unique(), key=lambda m: pd.to_datetime(m, format='%B').month)
-available_cities = sorted(df_raw['City'].unique())
-available_products = sorted(df_raw['Product'].unique())
+# ---------- filters ----------
+st.sidebar.header("Filters")
+all_cities = sorted(df["City"].unique())
+all_products = sorted(df["Product"].unique())
 
-selected_months = st.sidebar.multiselect("Select Months", available_months, default=available_months)
-selected_cities = st.sidebar.multiselect("Select Cities", available_cities, default=available_cities)
-selected_products = st.sidebar.multiselect("Select Products", available_products, default=available_products)
+months = st.sidebar.multiselect("Month", MONTHS, default=MONTHS)
+cities = st.sidebar.multiselect("City", all_cities, default=all_cities)
+products = st.sidebar.multiselect("Product", all_products, default=all_products)
 
-filtered_df = df_raw[
-    (df_raw['Month'].isin(selected_months)) & 
-    (df_raw['City'].isin(selected_cities)) & 
-    (df_raw['Product'].isin(selected_products))
-]
+filtered = df[df["Month"].isin(months) & df["City"].isin(cities) & df["Product"].isin(products)]
+if filtered.empty:
+    st.warning("No data for these filters. Select at least one month, city and product.")
+    st.stop()
 
-tab1, tab2 = st.tabs(["📊 Dashboard Analysis", "🧹 Data Cleaning & Outliers"])
+orders = filtered.groupby("Order ID")["Sales"].sum().reset_index()
 
-if filtered_df.empty:
-    with tab1:
-        st.warning("⚠️ No data matches your filter criteria.")
-    with tab2:
-        st.info("Adjust sidebars or see data cleaning transformations below.")
-else:
-    with tab1:
-        total_sales = filtered_df['Sales'].sum()
-        num_orders = filtered_df['Order ID'].nunique()
-        items_sold = filtered_df['Quantity Ordered'].sum()
-        avg_order_val = total_sales / num_orders if num_orders > 0 else 0
+tab_dashboard, tab_cleaning = st.tabs(["Dashboard", "Data cleaning"])
 
-        col1, col2, col3, col4 = st.columns(4)
-        col1.metric("💰 Total Sales", f"${total_sales:,.2f}")
-        col2.metric("📦 Number of Orders", f"{num_orders:,}")
-        col3.metric("🛒 Items Sold", f"{items_sold:,}")
-        col4.metric("📈 Avg Order Value", f"${avg_order_val:,.2f}")
+# ---------- dashboard tab ----------
+with tab_dashboard:
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Total sales", f"${filtered['Sales'].sum():,.0f}")
+    c2.metric("Orders", f"{filtered['Order ID'].nunique():,}")
+    c3.metric("Items sold", f"{filtered['Quantity Ordered'].sum():,}")
+    c4.metric("Average order", f"${orders['Sales'].mean():,.2f}")
 
-        st.markdown("---")
-        st.header("🔍 Univariate Analysis")
-        u_col1, u_col2 = st.columns(2)
-        
-        with u_col1:
-            fig_qty = px.histogram(filtered_df, x="Quantity Ordered", title="Distribution of Quantity Ordered", nbins=10, text_auto=True)
-            st.plotly_chart(fig_qty, use_container_width=True)
-            fig_sales = px.histogram(filtered_df, x="Sales", title="Distribution of Sales Value per Row", nbins=30)
-            st.plotly_chart(fig_sales, use_container_width=True)
-            fig_city = px.bar(filtered_df['City'].value_counts().reset_index(), x='City', y='count', title="Order Distribution across Cities")
-            st.plotly_chart(fig_city, use_container_width=True)
-            fig_hour = px.histogram(filtered_df, x="Hour", title="Order Frequency by Hour of Day", nbins=24)
-            st.plotly_chart(fig_hour, use_container_width=True)
+    left, right = st.columns(2)
 
-        with u_col2:
-            fig_price = px.histogram(filtered_df, x="Price Each", title="Distribution of Unit Price Each", nbins=30)
-            st.plotly_chart(fig_price, use_container_width=True)
-            fig_product = px.bar(filtered_df['Product'].value_counts().reset_index(), x='count', y='Product', orientation='h', title="Order Counts per Product Type")
-            st.plotly_chart(fig_product, use_container_width=True)
-            month_counts = filtered_df['Month'].value_counts().reindex(available_months).dropna().reset_index()
-            fig_month = px.bar(month_counts, x='Month', y='count', title="Order Frequency across Months")
-            st.plotly_chart(fig_month, use_container_width=True)
+    with left:
+        st.subheader("Q1. Which month had the best sales?")
+        ordered_months = [m for m in MONTHS if m in months]
+        monthly = filtered.groupby("Month")["Sales"].sum().reindex(ordered_months).reset_index()
+        show(px.bar(monthly, x="Month", y="Sales", color_discrete_sequence=[BLUE]))
+        best = monthly.loc[monthly["Sales"].idxmax()]
+        st.caption(f"Best month: **{best['Month']}** (\\${best['Sales']:,.0f})")
 
-        st.markdown("---")
-        st.header("🔗 Bivariate Analysis")
-        b_col1, b_col2 = st.columns(2)
-        
-        with b_col1:
-            city_avg_sales = filtered_df.groupby('City')['Sales'].mean().reset_index().sort_values(by='Sales', ascending=False)
-            fig_b1 = px.bar(city_avg_sales, x='City', y='Sales', title="Average Sales Value per Order Across Cities")
-            st.plotly_chart(fig_b1, use_container_width=True)
-            month_sales = filtered_df.groupby('Month')['Sales'].sum().reindex(available_months).dropna().reset_index()
-            fig_b3 = px.line(month_sales, x='Month', y='Sales', title="Total Sales Trend Across Months", markers=True)
-            st.plotly_chart(fig_b3, use_container_width=True)
+    with right:
+        st.subheader("Q2. Which city sells the most?")
+        city_sales = filtered.groupby("City")["Sales"].sum().sort_values().reset_index()
+        show(px.bar(city_sales, x="Sales", y="City", orientation="h", color_discrete_sequence=[BLUE]))
+        best = city_sales.iloc[-1]
+        st.caption(f"Best city: **{best['City']}** (\\${best['Sales']:,.0f})")
 
-        with b_col2:
-            prod_qty = filtered_df.groupby('Product')['Quantity Ordered'].sum().reset_index().sort_values(by='Quantity Ordered', ascending=False)
-            fig_b2 = px.bar(prod_qty, x='Quantity Ordered', y='Product', orientation='h', title="Total Quantity Demanded per Product")
-            st.plotly_chart(fig_b2, use_container_width=True)
-            hour_sales = filtered_df.groupby('Hour')['Sales'].sum().reset_index()
-            fig_b4 = px.line(hour_sales, x='Hour', y='Sales', title="Total Revenue Collected by Hour of Day", markers=True)
-            st.plotly_chart(fig_b4, use_container_width=True)
+    left, right = st.columns(2)
 
-        st.markdown("---")
-        st.header("🧠 Research Questions")
-        st.subheader("Research Question 1: Which day of the week generates the highest sales revenue?")
-        day_order = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']
-        day_sales = filtered_df.groupby('Day of Week')['Sales'].sum().reindex(day_order).reset_index()
-        fig_q1 = px.bar(day_sales, x='Day of Week', y='Sales', color='Sales', title="Weekly Revenue Distribution Pattern")
-        st.plotly_chart(fig_q1, use_container_width=True)
+    with left:
+        st.subheader("Q3. At what time do customers buy?")
+        hourly = filtered.groupby("Hour")["Sales"].sum().reset_index()
+        show(px.line(hourly, x="Hour", y="Sales", markers=True, color_discrete_sequence=[BLUE]))
+        best = hourly.loc[hourly["Sales"].idxmax()]
+        st.caption(f"Busiest hour: **{int(best['Hour'])}:00**")
 
-        st.subheader("Research Question 2: Which State brings in the highest aggregate volume of sales?")
-        state_sales = filtered_df.groupby('State')['Sales'].sum().reset_index().sort_values(by='Sales', ascending=False)
-        fig_q2 = px.pie(state_sales, values='Sales', names='State', title="Percentage Contribution of Total Sales Revenue by State", hole=0.4)
-        st.plotly_chart(fig_q2, use_container_width=True)
+    with right:
+        st.subheader("Q4. Which products make the most money?")
+        product_sales = filtered.groupby("Product")["Sales"].sum().sort_values().reset_index()
+        show(px.bar(product_sales, x="Sales", y="Product", orientation="h",
+                               height=450, color_discrete_sequence=[BLUE]))
+        best = product_sales.iloc[-1]
+        st.caption(f"Top product: **{best['Product']}** (\\${best['Sales']:,.0f})")
 
-        st.markdown("---")
-        st.header("🎯 Conclusion")
-        st.write("• **Peak Operational Hours:** Busiest hours are 11 AM - 1 PM and 6 PM - 8 PM.")
-        st.write("• **Geographic Superpowers:** California locations lead market expansion.")
+    left, right = st.columns(2)
 
-with tab2:
-    st.header("🧹 Data Preprocessing & Cleaning Ledger")
-    steps_df = pd.DataFrame(cleaning_steps.items(), columns=["Data Pipeline Step", "Remaining Row Count"])
-    st.table(steps_df)
-    
-    st.markdown("---")
-    st.header("📈 Outlier Evaluation Plots")
-    o_col1, o_col2 = st.columns(2)
-    with o_col1:
-        fig_box_qty = px.box(df_raw, y="Quantity Ordered", title="Quantity Ordered Outlier Detection Boxplot")
-        st.plotly_chart(fig_box_qty, use_container_width=True)
-    with o_col2:
-        fig_box_sales = px.box(df_raw, y="Sales", title="Sales Per Row Outlier Detection Boxplot")
-        st.plotly_chart(fig_box_sales, use_container_width=True)
+    with left:
+        st.subheader("Q5. How much does a customer spend in one order?")
+        show(px.histogram(orders, x="Sales", nbins=50, color_discrete_sequence=[BLUE]))
+        st.caption(f"Typical order (median): **\\${orders['Sales'].median():,.2f}** | "
+                   f"Average order (mean): **\\${orders['Sales'].mean():,.2f}**")
+
+    with right:
+        st.subheader("Most sold products (pieces)")
+        sold = filtered.groupby("Product")["Quantity Ordered"].sum().sort_values(ascending=False).reset_index()
+        st.dataframe(sold, hide_index=True)
+        st.caption("Compare with Q4: the most sold products are cheap, the most profitable are expensive.")
+
+# ---------- cleaning tab ----------
+with tab_cleaning:
+    st.subheader("What we did to the data")
+    st.table(pd.DataFrame(list(report.items()), columns=["Step", "Rows"]).set_index("Step"))
+    st.write("We dropped the extra `Unnamed: 0` column, empty rows, exact duplicate rows "
+             "and orders from outside 2019. Then we made the columns `Sales`, `Month`, `Hour` and `City`.")
+
+    st.subheader("Outliers")
+    left, right = st.columns(2)
+    with left:
+        show(px.box(df, y="Sales", title="Sales per row", color_discrete_sequence=[BLUE]))
+    with right:
+        show(px.histogram(df, x="Quantity Ordered", title="Quantity ordered in one row",
+                                     color_discrete_sequence=[BLUE]))
+    st.write("The dots above the box are laptops, phones and monitors. They are real, because expensive "
+             "products cost more, so we keep them. Large quantities (7 to 9) are only cheap batteries, "
+             "so we keep those too.")
+
+    st.subheader("Cleaned data (first 100 rows)")
+    st.dataframe(df.head(100), hide_index=True)
